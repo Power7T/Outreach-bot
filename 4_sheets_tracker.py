@@ -123,7 +123,59 @@ TRACKER_HEADERS = [
 STATUS_OPTIONS = ["New", "Sent", "Replied", "Not Interested"]
 
 
-def write_tracker_tab(ws: gspread.Worksheet, rows: list[list]) -> None:
+def apply_status_dropdown(spreadsheet: gspread.Spreadsheet, ws: gspread.Worksheet, last_data_row: int) -> None:
+    """
+    Apply Status dropdown validation via raw Sheets API batchUpdate.
+    Works on all gspread versions (v3 / v5 / v6) without adjustment.
+    """
+    sheet_id = ws.id
+    body = {
+        "requests": [
+            {
+                "setDataValidation": {
+                    "range": {
+                        "sheetId":          sheet_id,
+                        "startRowIndex":    1,              # row 2, 0-based
+                        "endRowIndex":      last_data_row,  # exclusive upper bound
+                        "startColumnIndex": 8,              # col I, 0-based
+                        "endColumnIndex":   9,
+                    },
+                    "rule": {
+                        "condition": {
+                            "type": "ONE_OF_LIST",
+                            "values": [
+                                {"userEnteredValue": opt} for opt in STATUS_OPTIONS
+                            ],
+                        },
+                        "showCustomUi": True,
+                        "strict":       True,
+                    },
+                }
+            }
+        ]
+    }
+    spreadsheet.batch_update(body)
+
+
+def auto_resize_columns(spreadsheet: gspread.Spreadsheet, ws: gspread.Worksheet, num_cols: int) -> None:
+    """Auto-resize all columns to fit their content via raw Sheets API."""
+    spreadsheet.batch_update({
+        "requests": [
+            {
+                "autoResizeDimensions": {
+                    "dimensions": {
+                        "sheetId":    ws.id,
+                        "dimension":  "COLUMNS",
+                        "startIndex": 0,
+                        "endIndex":   num_cols,
+                    }
+                }
+            }
+        ]
+    })
+
+
+def write_tracker_tab(spreadsheet: gspread.Spreadsheet, ws: gspread.Worksheet, rows: list[list]) -> None:
     """
     Write headers + data rows to the Outreach Tracker tab.
     Applies data validation (Status dropdown) and follow-up date formula.
@@ -133,36 +185,34 @@ def write_tracker_tab(ws: gspread.Worksheet, rows: list[list]) -> None:
     # Clear existing content and write headers + data in one batch
     all_data = [TRACKER_HEADERS] + rows
     ws.clear()
-    ws.update(range_name="A1", values=all_data)
+    ws.update(range_name="A1", values=all_data, value_input_option="USER_ENTERED")
 
-    # Bold the header row
-    ws.format("A1:K1", {"textFormat": {"bold": True}})
+    # Bold + background color for header row
+    ws.format("A1:K1", {
+        "textFormat":      {"bold": True},
+        "backgroundColor": {"red": 0.20, "green": 0.33, "blue": 0.58},
+        "textFormat":      {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+    })
 
     # Freeze header row
     ws.freeze(rows=1)
 
-    # Add Status dropdown validation for every data row (col I = col 9)
     if rows:
-        last_data_row = len(rows) + 1  # +1 for header
-        status_range  = f"I2:I{last_data_row}"
-        follow_range  = f"J2:J{last_data_row}"
+        last_data_row = len(rows) + 1   # +1 for header row
 
-        # Status data validation
-        ws.set_data_validation_for_cell_range(
-            status_range,
-            {
-                "condition": {
-                    "type": "ONE_OF_LIST",
-                    "values": STATUS_OPTIONS,
-                },
-                "showCustomUi": True,
-                "strict": True,
-            },
-        )
+        # Status dropdown — uses raw API so it works on every gspread version
+        print("    Applying Status dropdown …")
+        apply_status_dropdown(spreadsheet, ws, last_data_row)
 
-        # Follow-up date formula: =IF(I2="Sent", TODAY()+5, "")
-        follow_up_formulas = [[f'=IF(I{r}="Sent",TODAY()+5,"")'] for r in range(2, last_data_row + 1)]
-        ws.update(range_name=follow_range, values=follow_up_formulas)
+        # Follow-up date formula: =IF(I{row}="Sent", TODAY()+5, "")
+        # value_input_option="USER_ENTERED" ensures Google Sheets parses these as formulas
+        follow_range          = f"J2:J{last_data_row}"
+        follow_up_formulas    = [[f'=IF(I{r}="Sent",TODAY()+5,"")'] for r in range(2, last_data_row + 1)]
+        ws.update(range_name=follow_range, values=follow_up_formulas, value_input_option="USER_ENTERED")
+
+        # Auto-resize all columns to fit content
+        print("    Auto-resizing columns …")
+        auto_resize_columns(spreadsheet, ws, len(TRACKER_HEADERS))
 
     print(f"  Tracker tab complete.")
 
@@ -234,7 +284,7 @@ def main():
 
     # Write Tracker tab
     tracker_ws = get_or_create_worksheet(spreadsheet, config.SHEET_TAB_TRACKER)
-    write_tracker_tab(tracker_ws, tracker_rows)
+    write_tracker_tab(spreadsheet, tracker_ws, tracker_rows)
 
     # Write Summary tab
     summary_ws = get_or_create_worksheet(spreadsheet, config.SHEET_TAB_SUMMARY)
